@@ -394,9 +394,26 @@ local function makeV2Card(title, body, color, ping)
     return payload
 end
 
+local MAX_REPORT_BODY_CHARS = 3500
+
+local function fitBodySize(body)
+    body = tostring(body or "")
+    if #body <= MAX_REPORT_BODY_CHARS then
+        return body, false
+    end
+    local remain = #body - MAX_REPORT_BODY_CHARS
+    local clipped = body:sub(1, MAX_REPORT_BODY_CHARS) .. ("\n\n… +%d ký tự nữa (quá dài cho Discord webhook)"):format(remain)
+    return clipped, true
+end
+
 local function makeCard(title, body, color, ping)
-    if CONFIG.USE_COMPONENTS_V2 then return makeV2Card(title, body, color, ping) end
-    return makeEmbedCard(title, body, color, ping)
+    local safeBody, clipped = fitBodySize(body)
+    if clipped then
+        warn("[SP] Report body quá dài, đã tự rút gọn để tránh lỗi 400")
+    end
+
+    if CONFIG.USE_COMPONENTS_V2 then return makeV2Card(title, safeBody, color, ping) end
+    return makeEmbedCard(title, safeBody, color, ping)
 end
 
 local function buildAlert(buf, color)
@@ -413,33 +430,67 @@ local function buildAlert(buf, color)
     return makeCard("🔔 Drop Alert!", body, color, pingStr())
 end
 
-local function buildReport()
-    local ord = {Secret=1,Mythic=2,Legendary=3}
+local function buildReport()    
+    local ord = {Secret=1, Mythic=2, Legendary=3}
     local sorted = {}
+    local rare = {Secret=0, Mythic=0, Legendary=0}
+
     for name, d in pairs(sessionItems) do
-        table.insert(sorted, {name=tostring(name), count=tonumber(d and d.count) or 0})
+        local count = tonumber(d and d.count) or 0
+        table.insert(sorted, {name=tostring(name), count=count})
+        local tier = TIER_LOOKUP[name]
+        if tier and rare[tier] then
+            rare[tier] = rare[tier] + count
+        end
     end
-    table.sort(sorted, function(a,b)
+
+    table.sort(sorted, function(a, b)
         local ta = ord[TIER_LOOKUP[a.name]] or 4
         local tb = ord[TIER_LOOKUP[b.name]] or 4
-        if ta~=tb then return ta<tb end
-        if a.count~=b.count then return a.count>b.count end
-        return a.name<b.name
+        if ta ~= tb then return ta < tb end
+        if a.count ~= b.count then return a.count > b.count end
+        return a.name < b.name
     end)
-    local lines = {}
-    for _, d in ipairs(sorted) do table.insert(lines, "• "..d.name.." ×"..d.count) end
-    local itemText = #lines>0 and table.concat(lines,"\n") or "*Chưa có item nào*"
+
+    local featured = {}
+    local others = {}
+    local featuredLookup = {
+        ["clan reroll"] = true,
+        ["trait reroll"] = true,
+        ["race reroll"] = true,
+    }
+
+    for _, d in ipairs(sorted) do
+        local line = "• " .. d.name .. " ×" .. d.count
+        if featuredLookup[string.lower(d.name)] then
+            table.insert(featured, line)
+        else
+            table.insert(others, line)
+        end
+    end
+
+    local featuredText = #featured > 0 and table.concat(featured, "\n") or "*Chưa có Clan/Trait/Race Reroll*"
+    local otherText = #others > 0 and table.concat(others, "\n") or "*Không có item khác*"
+
     local delta = sessionGems - gemsAtLastReport
     gemsAtLastReport = sessionGems
+
     local acColor = 0x2B5FD9
-    for name in pairs(sessionItems) do
-        local t = TIER_LOOKUP[name]
-        if t=="Secret"   then acColor=0xFF0000; break end
-        if t=="Mythic"   then acColor=0xFF4500 end
-        if t=="Legendary" and acColor==0x2B5FD9 then acColor=0xFFAA00 end
-    end
-    local body = ("💎 **%s** ( +%s )   ·   📦 **×%d**   ·   ⏱️ **%s**\n\n%s"):format(
-        fmtNum(sessionGems), fmtNum(delta), totalItems(), fmtTime(os.time()-sessionStart), itemText)
+    if rare.Secret > 0 then acColor = 0xFF0000
+    elseif rare.Mythic > 0 then acColor = 0xFF4500
+    elseif rare.Legendary > 0 then acColor = 0xFFAA00 end
+
+    local body = (
+        "💎 **%s** ( +%s )   ·   📦 **×%d**   ·   ⏱️ **%s**\n" ..
+        "🔴 Secret **×%d**  ·  🟠 Mythic **×%d**  ·  🟡 Legendary **×%d**\n\n" ..
+        "✨ **Drop nổi bật**\n%s\n\n" ..
+        "📦 **Item khác**\n%s"
+    ):format(
+        fmtNum(sessionGems), fmtNum(delta), totalItems(), fmtTime(os.time()-sessionStart),
+        rare.Secret, rare.Mythic, rare.Legendary,
+        featuredText, otherText
+    )
+
     return makeCard("📋 Session Report", body, acColor, pingStr())
 end
 
@@ -684,6 +735,7 @@ local function buildGUI()
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.DisplayOrder = 999
     gui.Parent = LP.PlayerGui
 
     local win = Instance.new("Frame")
@@ -702,6 +754,7 @@ local function buildGUI()
     tabBar.Size = UDim2.new(1, 0, 0, 34)
     tabBar.BackgroundColor3 = Color3.fromRGB(1, 4, 9)
     tabBar.BorderSizePixel = 0
+    tabBar.Active = true
     tabBar.Parent = win
 
     local tabLine = Instance.new("Frame")
@@ -710,6 +763,19 @@ local function buildGUI()
     tabLine.BackgroundColor3 = BORDER2
     tabLine.BorderSizePixel = 0
     tabLine.Parent = tabBar
+
+    local collapseBtn = Instance.new("TextButton")
+    collapseBtn.Size = UDim2.new(0, 26, 0, 22)
+    collapseBtn.Position = UDim2.new(1, -30, 0.5, -11)
+    collapseBtn.BackgroundColor3 = CARD
+    collapseBtn.BorderSizePixel = 0
+    collapseBtn.Font = Enum.Font.GothamBold
+    collapseBtn.Text = "—"
+    collapseBtn.TextSize = 13
+    collapseBtn.TextColor3 = MUTED
+    collapseBtn.ZIndex = 5
+    collapseBtn.Parent = tabBar
+    Instance.new("UICorner", collapseBtn).CornerRadius = UDim.new(0, 6)
 
     local tabBtns = {}
     for i, name in ipairs(TABS) do
@@ -720,7 +786,7 @@ local function buildGUI()
         tb.BorderSizePixel = 0
         tb.Font = Enum.Font.GothamBold
         tb.Text = name
-        tb.TextSize = 9
+        tb.TextSize = 11
         tb.TextColor3 = (i==1) and ACCENT or MUTED
         tb.Parent = tabBar
         tabBtns[i] = tb
@@ -741,6 +807,7 @@ local function buildGUI()
     header.Position = UDim2.new(0, 0, 0, 34)
     header.BackgroundColor3 = BG2
     header.BorderSizePixel = 0
+    header.Active = true
     header.Parent = win
 
     local headerLine = Instance.new("Frame")
@@ -766,6 +833,7 @@ local function buildGUI()
     titleLbl.TextSize = 12
     titleLbl.TextXAlignment = Enum.TextXAlignment.Left
     titleLbl.TextColor3 = TEXT
+    titleLbl.Active = false
     titleLbl.Parent = header
 
     local subLbl = Instance.new("TextLabel")
@@ -774,9 +842,10 @@ local function buildGUI()
     subLbl.BackgroundTransparency = 1
     subLbl.Font = Enum.Font.Gotham
     subLbl.Text = "Neo Dark Tab UI"
-    subLbl.TextSize = 9
+    subLbl.TextSize = 11
     subLbl.TextXAlignment = Enum.TextXAlignment.Left
     subLbl.TextColor3 = MUTED
+    subLbl.Active = false
     subLbl.Parent = header
 
     local minBtn = Instance.new("TextButton")
@@ -785,9 +854,10 @@ local function buildGUI()
     minBtn.BackgroundColor3 = CARD
     minBtn.Text = "—"
     minBtn.Font = Enum.Font.GothamBold
-    minBtn.TextSize = 11
+    minBtn.TextSize = 13
     minBtn.TextColor3 = MUTED
     minBtn.BorderSizePixel = 0
+    minBtn.Visible = false
     minBtn.Parent = header
     Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0,6)
 
@@ -821,7 +891,7 @@ local function buildGUI()
     statusLbl.BackgroundTransparency = 1
     statusLbl.Font = Enum.Font.Gotham
     statusLbl.Text = "Ready"
-    statusLbl.TextSize = 9
+    statusLbl.TextSize = 11
     statusLbl.TextXAlignment = Enum.TextXAlignment.Left
     statusLbl.TextColor3 = MUTED
     statusLbl.Parent = statBar
@@ -833,7 +903,7 @@ local function buildGUI()
     statusRight.BackgroundTransparency = 1
     statusRight.Font = Enum.Font.Gotham
     statusRight.Text = ""
-    statusRight.TextSize = 9
+    statusRight.TextSize = 11
     statusRight.TextXAlignment = Enum.TextXAlignment.Right
     statusRight.TextColor3 = ACCENT
     statusRight.Parent = statBar
@@ -888,10 +958,9 @@ local function buildGUI()
         l.BackgroundTransparency = 1
         l.Font = Enum.Font.GothamBold
         l.Text = txt
-        l.TextSize = 8
+        l.TextSize = 12
         l.TextXAlignment = Enum.TextXAlignment.Left
         l.TextColor3 = MUTED
-        l.LetterSpacing = 80
     end
 
     local function mkInputBox(placeholder, default, order)
@@ -915,7 +984,7 @@ local function buildGUI()
         tb.PlaceholderColor3 = Color3.fromRGB(90,100,130)
         tb.Text = default
         tb.TextColor3 = TEXT
-        tb.TextSize = 10
+        tb.TextSize = 12
         tb.TextXAlignment = Enum.TextXAlignment.Left
         tb.Parent = f
 
@@ -958,7 +1027,7 @@ local function buildGUI()
             tb.PlaceholderColor3 = Color3.fromRGB(90,100,130)
             tb.Text = item[2]
             tb.TextColor3 = TEXT
-            tb.TextSize = 9
+            tb.TextSize = 11
             tb.Parent = box
             tb.Focused:Connect(function() TweenService:Create(s,TweenInfo.new(0.12),{Color=ACCENT}):Play() end)
             tb.FocusLost:Connect(function()  TweenService:Create(s,TweenInfo.new(0.12),{Color=BORDER}):Play() end)
@@ -983,7 +1052,7 @@ local function buildGUI()
         lbl.Position = UDim2.new(0,10,0,0)
         lbl.BackgroundTransparency = 1
         lbl.Font = Enum.Font.Gotham
-        lbl.TextSize = 10
+        lbl.TextSize = 12
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Text = initState and labelOn or labelOff
         lbl.TextColor3 = initState and TEXT or MUTED
@@ -1031,7 +1100,7 @@ local function buildGUI()
         b.BorderSizePixel = 0
         b.Font = Enum.Font.GothamBold
         b.Text = text
-        b.TextSize = 10
+        b.TextSize = 12
         b.TextColor3 = color
         b.LayoutOrder = order
         b.Parent = cfgScroll
@@ -1067,7 +1136,7 @@ local function buildGUI()
             b.BorderSizePixel = 0
             b.Font = Enum.Font.GothamBold
             b.Text = item[1]
-            b.TextSize = 9
+            b.TextSize = 11
             b.TextColor3 = item[2]
             Instance.new("UICorner",b).CornerRadius = UDim.new(0,7)
             local s = Instance.new("UIStroke",b)
@@ -1100,7 +1169,7 @@ local function buildGUI()
         bl.BackgroundTransparency = 1
         bl.Font = Enum.Font.GothamBold
         bl.Text = "✓ Config đã được tải tự động từ file"
-        bl.TextSize = 9
+        bl.TextSize = 11
         bl.TextXAlignment = Enum.TextXAlignment.Left
         bl.TextColor3 = GREEN
     end
@@ -1241,7 +1310,7 @@ local function buildGUI()
         lbl.BackgroundTransparency = 1
         lbl.Font = Enum.Font.GothamBold
         lbl.Text = icon.." "..labelTxt
-        lbl.TextSize = 8
+        lbl.TextSize = 12
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.TextColor3 = MUTED
 
@@ -1263,7 +1332,7 @@ local function buildGUI()
         sub.BackgroundTransparency = 1
         sub.Font = Enum.Font.Gotham
         sub.Text = subTxt
-        sub.TextSize = 9
+        sub.TextSize = 11
         sub.TextXAlignment = Enum.TextXAlignment.Left
         sub.TextColor3 = GREEN
 
@@ -1283,7 +1352,7 @@ local function buildGUI()
     dropsLabel.BackgroundTransparency = 1
     dropsLabel.Font = Enum.Font.GothamBold
     dropsLabel.Text = "RECENT DROPS"
-    dropsLabel.TextSize = 8
+    dropsLabel.TextSize = 12
     dropsLabel.TextXAlignment = Enum.TextXAlignment.Left
     dropsLabel.TextColor3 = MUTED
 
@@ -1333,7 +1402,7 @@ local function buildGUI()
         tierTag.BackgroundTransparency = 1
         tierTag.Font = Enum.Font.GothamBold
         tierTag.Text = "COMMON"
-        tierTag.TextSize = 8
+        tierTag.TextSize = 12
         tierTag.TextXAlignment = Enum.TextXAlignment.Left
         tierTag.TextColor3 = MUTED
 
@@ -1344,7 +1413,7 @@ local function buildGUI()
         nameLbl.BackgroundTransparency = 1
         nameLbl.Font = Enum.Font.Gotham
         nameLbl.Text = "—"
-        nameLbl.TextSize = 9
+        nameLbl.TextSize = 11
         nameLbl.TextXAlignment = Enum.TextXAlignment.Left
         nameLbl.TextColor3 = TEXT
 
@@ -1355,7 +1424,7 @@ local function buildGUI()
         cntLbl.BackgroundTransparency = 1
         cntLbl.Font = Enum.Font.GothamBold
         cntLbl.Text = "×1"
-        cntLbl.TextSize = 9
+        cntLbl.TextSize = 11
         cntLbl.TextXAlignment = Enum.TextXAlignment.Right
         cntLbl.TextColor3 = MUTED
 
@@ -1403,7 +1472,7 @@ local function buildGUI()
         l.BackgroundTransparency = 1
         l.Font = Enum.Font.Gotham
         l.Text = ""
-        l.TextSize = 8
+        l.TextSize = 12
         l.TextXAlignment = Enum.TextXAlignment.Left
         l.TextColor3 = MUTED
         l.LayoutOrder = i
@@ -1457,36 +1526,69 @@ local function buildGUI()
 
     -- ── Minimize ─────────────────────────────────────
     local minimized = false
-    minBtn.MouseButton1Click:Connect(function()
-        minimized = not minimized
+    local function applyMinimizedState()
         TweenService:Create(win, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
             Size = UDim2.new(0, W, 0, minimized and 34 or H)
         }):Play()
-        header.Visible   = not minimized
-        statBar.Visible  = not minimized
-        for _, p in ipairs(pages) do p.Visible = not minimized and (pages[activeTab]==p) end
-        minBtn.Text = minimized and "□" or "—"
-    end)
+        header.Visible = not minimized
+        statBar.Visible = not minimized
+        for i, p in ipairs(pages) do
+            p.Visible = (not minimized) and (i == activeTab)
+        end
+        collapseBtn.Text = minimized and "+" or "—"
+    end
+
+    local function toggleMinimized()
+        minimized = not minimized
+        applyMinimizedState()
+    end
+
+    collapseBtn.MouseButton1Click:Connect(toggleMinimized)
+    minBtn.MouseButton1Click:Connect(toggleMinimized)
 
     -- ── Drag ─────────────────────────────────────────
     local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
-    local function dragOn(i)
-        if i.UserInputType==Enum.UserInputType.MouseButton1 then
-            dragging=true; dragInput=i; dragStart=i.Position; startPos=win.Position
+
+    local function startDrag(i)
+        if i.UserInputType ~= Enum.UserInputType.MouseButton1 and i.UserInputType ~= Enum.UserInputType.Touch then
+            return
         end
+        dragging = true
+        dragInput = i
+        dragStart = i.Position
+        startPos = win.Position
+
+        i.Changed:Connect(function()
+            if i.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
     end
-    local function dragOff(i) if i==dragInput then dragging=false end end
-    tabBar.InputBegan:Connect(dragOn)
-    tabBar.InputEnded:Connect(dragOff)
-    header.InputBegan:Connect(dragOn)
-    header.InputEnded:Connect(dragOff)
-    UIS.InputChanged:Connect(function(i)
-        if dragging and i.UserInputType==Enum.UserInputType.MouseMovement then
-            local d = i.Position - dragStart
-            win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset+d.X,
-                startPos.Y.Scale, startPos.Y.Offset+d.Y)
+
+    local function updateDrag(i)
+        if not dragging then return end
+        if i ~= dragInput and i.UserInputType ~= Enum.UserInputType.MouseMovement and i.UserInputType ~= Enum.UserInputType.Touch then
+            return
+        end
+        local d = i.Position - dragStart
+        win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    end
+
+    tabBar.InputBegan:Connect(startDrag)
+    header.InputBegan:Connect(startDrag)
+
+    tabBar.InputChanged:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+            dragInput = i
         end
     end)
+    header.InputChanged:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+            dragInput = i
+        end
+    end)
+
+    UIS.InputChanged:Connect(updateDrag)
 
     -- ── Slide in ─────────────────────────────────────
     TweenService:Create(win,
