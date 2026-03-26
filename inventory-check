@@ -1,6 +1,6 @@
 -- ╔══════════════════════════════════════════════════════════════════╗
--- ║   SAILOR PIECE  ·  WEBHOOK NOTIFIER  v8.0                     ║
--- ║   GUI: Neo Dark Tab UI  ·  Components v2  ·  All Items        ║
+-- ║   SAILORHOOK  ·  WEBHOOK NOTIFIER  v8.0                       ║
+-- ║   GUI: Neo Dark Tab UI  ·  Components v2  ·  Auto-Save        ║
 -- ║   Synapse X / KRNL / Fluxus / Delta / Wave / Executor         ║
 -- ╚══════════════════════════════════════════════════════════════════╝
 
@@ -21,6 +21,122 @@ local CONFIG = {
     USE_COMPONENTS_V2 = true,
     WEBHOOK_DEBUG     = false,
 }
+
+-- ══════════════════════════════
+--   PERSISTENT CONFIG  (writefile / readfile)
+-- ══════════════════════════════
+local SAVE_FILE = "sailorhook_config.json"
+local MIN_REPORT_INTERVAL = 15
+local MAX_REPORT_INTERVAL = 3600
+
+-- Các key được lưu/load (không lưu BOT_NAME, BOT_AVATAR, DEBUG)
+local SAVE_KEYS = {
+    "WEBHOOK_URL","DISCORD_ID","REPORT_INTERVAL",
+    "WEBHOOK_ENABLED","NOTIFY_ITEMS","NOTIFY_GEMS",
+    "NOTIFY_DISCONNECT","PING_ON_RARE","USE_COMPONENTS_V2",
+}
+
+local function clamp(n, minN, maxN)
+    if n < minN then return minN end
+    if n > maxN then return maxN end
+    return n
+end
+
+local function sanitizeInterval(v)
+    local n = tonumber(v) or CONFIG.REPORT_INTERVAL or 60
+    n = math.floor(n)
+    return clamp(n, MIN_REPORT_INTERVAL, MAX_REPORT_INTERVAL)
+end
+
+local function sanitizeConfig()
+    CONFIG.WEBHOOK_URL = tostring(CONFIG.WEBHOOK_URL or ""):match("^%s*(.-)%s*$") or ""
+    CONFIG.DISCORD_ID = tostring(CONFIG.DISCORD_ID or ""):match("^%s*(.-)%s*$") or ""
+    CONFIG.REPORT_INTERVAL = sanitizeInterval(CONFIG.REPORT_INTERVAL)
+
+    CONFIG.WEBHOOK_ENABLED   = not not CONFIG.WEBHOOK_ENABLED
+    CONFIG.NOTIFY_ITEMS      = not not CONFIG.NOTIFY_ITEMS
+    CONFIG.NOTIFY_GEMS       = not not CONFIG.NOTIFY_GEMS
+    CONFIG.NOTIFY_DISCONNECT = not not CONFIG.NOTIFY_DISCONNECT
+    CONFIG.PING_ON_RARE      = not not CONFIG.PING_ON_RARE
+    CONFIG.USE_COMPONENTS_V2 = not not CONFIG.USE_COMPONENTS_V2
+end
+
+local function fileExists(path)
+    if isfile then return isfile(path) end
+    if syn and syn.is_file then return syn.is_file(path) end
+    return false
+end
+
+local function readFile(path)
+    if readfile then return readfile(path) end
+    if syn and syn.read_file then return syn.read_file(path) end
+    return nil
+end
+
+local function writeFile(path, content)
+    if writefile then writefile(path, content); return true end
+    if syn and syn.write_file then syn.write_file(path, content); return true end
+    return false
+end
+
+local function loadConfig()
+    local ok, exists = pcall(fileExists, SAVE_FILE)
+    if not ok or not exists then sanitizeConfig(); return false end
+    local ok2, raw = pcall(readFile, SAVE_FILE)
+    if not ok2 or not raw or raw == "" then sanitizeConfig(); return false end
+    local ok3, data = pcall(function()
+        return game:GetService("HttpService"):JSONDecode(raw)
+    end)
+    if not ok3 or type(data) ~= "table" then
+        warn("[SP] ⚠ Config file bị lỗi, dùng mặc định")
+        sanitizeConfig()
+        return false
+    end
+    for _, key in ipairs(SAVE_KEYS) do
+        if data[key] ~= nil then CONFIG[key] = data[key] end
+    end
+    sanitizeConfig()
+    print("[SP] ✅ Đã load config từ "..SAVE_FILE)
+    return true
+end
+
+local function saveConfig()
+    sanitizeConfig()
+    local data = {}
+    for _, key in ipairs(SAVE_KEYS) do data[key] = CONFIG[key] end
+    local ok, raw = pcall(function()
+        return game:GetService("HttpService"):JSONEncode(data)
+    end)
+    if not ok then warn("[SP] ⚠ Không encode được config: "..tostring(raw)); return false end
+    local ok2, err = pcall(writeFile, SAVE_FILE, raw)
+    if not ok2 then
+        warn("[SP] ⚠ Không ghi được file ("..tostring(err)..") — executor có thể không hỗ trợ writefile")
+        return false
+    end
+    print("[SP] 💾 Config đã lưu → "..SAVE_FILE)
+    return true
+end
+
+local autoSaveBusy = false
+local autoSavePending = false
+local function saveConfigAuto()
+    if autoSaveBusy then
+        autoSavePending = true
+        return
+    end
+    autoSaveBusy = true
+    task.spawn(function()
+        saveConfig()
+        autoSaveBusy = false
+        if autoSavePending then
+            autoSavePending = false
+            saveConfigAuto()
+        end
+    end)
+end
+
+-- Load ngay khi execute — trước khi build GUI
+local _loadedFromFile = loadConfig()
 
 -- ══════════════════════════════
 --   ITEM DATABASE
@@ -157,6 +273,38 @@ local function queueWebhook(payload)
     table.insert(webhookQueue, payload)
 end
 
+local function sendWithRetry(url, payloadBody, maxRetries)
+    maxRetries = tonumber(maxRetries) or 3
+    local backoffs = {2, 5, 10}
+
+    local attempt = 1
+    while attempt <= (maxRetries + 1) do
+        local res = sendHTTP(url, payloadBody)
+        local okHttp, code, respBody = parseHttpResult(res)
+        if okHttp then
+            return true, code, respBody, attempt
+        end
+
+        local shouldRetry = false
+        if okHttp == nil then
+            shouldRetry = true
+        elseif tonumber(code) == 429 or (tonumber(code) and tonumber(code) >= 500) then
+            shouldRetry = true
+        end
+
+        if attempt > maxRetries or not shouldRetry then
+            return false, code, respBody, attempt
+        end
+
+        local waitSec = backoffs[attempt] or backoffs[#backoffs]
+        dbg(("retry attempt=%d wait=%ss code=%s"):format(attempt + 1, tostring(waitSec), tostring(code)))
+        task.wait(waitSec)
+        attempt = attempt + 1
+    end
+
+    return false, nil, nil, maxRetries + 1
+end
+
 local function flushQueue()
     if #webhookQueue == 0 then return end
     local now = os.time()
@@ -166,9 +314,11 @@ local function flushQueue()
     task.spawn(function()
         local ok, body = pcall(HttpService.JSONEncode, HttpService, payload)
         if not ok then warn("[SP] JSON encode lỗi: "..tostring(body)); return end
-        local res = sendHTTP(CONFIG.WEBHOOK_URL, body)
-        local okHttp, code = parseHttpResult(res)
+        local okHttp, code = sendWithRetry(CONFIG.WEBHOOK_URL, body, 3)
         dbg(("flush ok=%s code=%s"):format(tostring(okHttp), tostring(code)))
+        if not okHttp then
+            warn("[SP] Webhook flush failed code="..tostring(code))
+        end
     end)
 end
 
@@ -933,43 +1083,86 @@ local function buildGUI()
     end
 
     -- Build Config tab content
+    -- Hiển thị badge nếu đã load từ file
+    if _loadedFromFile then
+        local badge = Instance.new("Frame")
+        badge.Size = UDim2.new(1,0,0,22)
+        badge.BackgroundColor3 = Color3.fromRGB(10, 40, 20)
+        badge.BorderSizePixel = 0
+        badge.LayoutOrder = 0
+        badge.Parent = cfgScroll
+        Instance.new("UICorner",badge).CornerRadius = UDim.new(0,6)
+        local bs = Instance.new("UIStroke",badge)
+        bs.Color = GREEN; bs.Thickness = 1
+        local bl = Instance.new("TextLabel",badge)
+        bl.Size = UDim2.new(1,-10,1,0)
+        bl.Position = UDim2.new(0,8,0,0)
+        bl.BackgroundTransparency = 1
+        bl.Font = Enum.Font.GothamBold
+        bl.Text = "✓ Config đã được tải tự động từ file"
+        bl.TextSize = 9
+        bl.TextXAlignment = Enum.TextXAlignment.Left
+        bl.TextColor3 = GREEN
+    end
+
     mkSectionLabel("WEBHOOK URL", 1)
     local wbBox = mkInputBox("https://discord.com/api/webhooks/...", CONFIG.WEBHOOK_URL, 2)
 
     mkSectionLabel("DISCORD ID  /  INTERVAL (s)", 3)
     local inlineBoxes = mkInlineInputs({
         {"Discord ID (để ping)", CONFIG.DISCORD_ID, 0.65},
-        {tostring(CONFIG.REPORT_INTERVAL).."s", tostring(CONFIG.REPORT_INTERVAL), 0.35},
+        {tostring(CONFIG.REPORT_INTERVAL), tostring(CONFIG.REPORT_INTERVAL), 0.35},
     }, 4)
     local idBox  = inlineBoxes[1]
     local intBox = inlineBoxes[2]
 
+    local function applyFormToConfig()
+        local rawInterval = tonumber(intBox.Text)
+        CONFIG.WEBHOOK_URL = wbBox.Text:match("^%s*(.-)%s*$") or ""
+        CONFIG.DISCORD_ID = idBox.Text:match("^%s*(.-)%s*$") or ""
+        CONFIG.REPORT_INTERVAL = sanitizeInterval(rawInterval)
+        intBox.Text = tostring(CONFIG.REPORT_INTERVAL)
+        return rawInterval
+    end
+
     mkSectionLabel("TOGGLES", 5)
-    mkToggle("● Webhook ON",  "○ Webhook OFF",    CONFIG.WEBHOOK_ENABLED,   6,  function(v) CONFIG.WEBHOOK_ENABLED=v end)
-    mkToggle("● Items ON",    "○ Items OFF",       CONFIG.NOTIFY_ITEMS,      7,  function(v) CONFIG.NOTIFY_ITEMS=v end)
-    mkToggle("● Gems ON",     "○ Gems OFF",        CONFIG.NOTIFY_GEMS,       8,  function(v) CONFIG.NOTIFY_GEMS=v end)
-    mkToggle("● Ping Rare ON","○ Ping Rare OFF",   CONFIG.PING_ON_RARE,      9,  function(v) CONFIG.PING_ON_RARE=v end)
-    mkToggle("● Disconnect ON","○ Disconnect OFF", CONFIG.NOTIFY_DISCONNECT, 10, function(v) CONFIG.NOTIFY_DISCONNECT=v end)
-    mkToggle("● Components v2 ON","○ Embeds",      CONFIG.USE_COMPONENTS_V2, 11, function(v) CONFIG.USE_COMPONENTS_V2=v end)
+    mkToggle("● Webhook ON",  "○ Webhook OFF",    CONFIG.WEBHOOK_ENABLED,   6,  function(v) CONFIG.WEBHOOK_ENABLED=v; saveConfigAuto() end)
+    mkToggle("● Items ON",    "○ Items OFF",       CONFIG.NOTIFY_ITEMS,      7,  function(v) CONFIG.NOTIFY_ITEMS=v; saveConfigAuto() end)
+    mkToggle("● Gems ON",     "○ Gems OFF",        CONFIG.NOTIFY_GEMS,       8,  function(v) CONFIG.NOTIFY_GEMS=v; saveConfigAuto() end)
+    mkToggle("● Ping Rare ON","○ Ping Rare OFF",   CONFIG.PING_ON_RARE,      9,  function(v) CONFIG.PING_ON_RARE=v; saveConfigAuto() end)
+    mkToggle("● Disconnect ON","○ Disconnect OFF", CONFIG.NOTIFY_DISCONNECT, 10, function(v) CONFIG.NOTIFY_DISCONNECT=v; saveConfigAuto() end)
+    mkToggle("● Components v2 ON","○ Embeds",      CONFIG.USE_COMPONENTS_V2, 11, function(v) CONFIG.USE_COMPONENTS_V2=v; saveConfigAuto() end)
 
     mkSectionLabel("ACTIONS", 12)
 
     -- Save button (full width)
     mkBtn("💾  SAVE CONFIG", ACCENT, 13, function()
-        local url = wbBox.Text:match("^%s*(.-)%s*$")
-        CONFIG.WEBHOOK_URL    = url
-        CONFIG.DISCORD_ID     = idBox.Text:match("^%s*(.-)%s*$")
-        CONFIG.REPORT_INTERVAL= tonumber(intBox.Text) or 60
-        if isUrlValid(url) then
-            statusLbl.Text = ("✓ Saved — interval %ds"):format(CONFIG.REPORT_INTERVAL)
-            statusLbl.TextColor3 = GREEN
-            statusDot.BackgroundColor3 = GREEN
-            addLog("💾 Config saved")
-        else
+        local oldInterval = tonumber(CONFIG.REPORT_INTERVAL) or 60
+        local rawInterval = applyFormToConfig()
+        local url = CONFIG.WEBHOOK_URL
+
+        if not isUrlValid(url) then
             statusLbl.Text = "✗ URL không hợp lệ"
             statusLbl.TextColor3 = RED
             statusDot.BackgroundColor3 = RED
+            return
         end
+
+        local fileSaved = saveConfig()
+        local guardMsg = ""
+        if rawInterval == nil or math.floor(rawInterval) ~= CONFIG.REPORT_INTERVAL or oldInterval ~= CONFIG.REPORT_INTERVAL then
+            guardMsg = (" (guard %d-%ds)"):format(MIN_REPORT_INTERVAL, MAX_REPORT_INTERVAL)
+        end
+
+        if fileSaved then
+            statusLbl.Text = ("✓ Saved to file — interval %ds%s"):format(CONFIG.REPORT_INTERVAL, guardMsg)
+            addLog("💾 Config saved → "..SAVE_FILE)
+        else
+            statusLbl.Text = ("✓ Saved (no writefile) — interval %ds%s"):format(CONFIG.REPORT_INTERVAL, guardMsg)
+            addLog("💾 Config saved (session only — executor không hỗ trợ writefile)")
+        end
+        statusLbl.TextColor3 = GREEN
+        statusDot.BackgroundColor3 = GREEN
     end)
 
     -- Report / Test row
@@ -983,21 +1176,23 @@ local function buildGUI()
             addLog("📤 Manual report queued")
         end},
         {"🧪 TEST", PURPLE, function()
+            local rawInterval = applyFormToConfig()
             if not isUrlValid(CONFIG.WEBHOOK_URL) then
                 statusLbl.Text="✗ URL chưa hợp lệ"; statusLbl.TextColor3=RED; return
             end
+            saveConfigAuto()
             task.spawn(function()
                 local payload=buildTest()
                 local ok,body=pcall(HttpService.JSONEncode,HttpService,payload)
                 if not ok then statusLbl.Text="✗ JSON lỗi"; statusLbl.TextColor3=RED; return end
-                local res=sendHTTP(CONFIG.WEBHOOK_URL,body)
-                local okHttp,code=parseHttpResult(res)
-                if okHttp==nil then okHttp=(res~=nil) end
+                local okHttp,code,_,attempts=sendWithRetry(CONFIG.WEBHOOK_URL,body,3)
                 if okHttp then
-                    statusLbl.Text="✓ Test thành công"; statusLbl.TextColor3=GREEN
+                    local guardTag = (rawInterval and math.floor(rawInterval)==CONFIG.REPORT_INTERVAL) and "" or " | guard interval"
+                    statusLbl.Text=("✓ Test thành công (%d try)%s"):format(attempts or 1, guardTag)
+                    statusLbl.TextColor3=GREEN
                     addLog("✅ Webhook test OK")
                 else
-                    statusLbl.Text=("✗ Test lỗi %s"):format(tostring(code))
+                    statusLbl.Text=("✗ Test lỗi %s (%d try)"):format(tostring(code), attempts or 1)
                     statusLbl.TextColor3=RED
                     addLog("❌ Webhook test FAILED code="..tostring(code))
                 end
@@ -1336,7 +1531,19 @@ end
 print("[SP] ══ SAILOR PIECE v8.0  ·  NEO DARK TAB UI ══")
 
 local statusLabel = buildGUI()
-addLog("🚀 Sailor Piece v8 started — "..LP.Name)
+
+if _loadedFromFile then
+    addLog("📂 Config auto-loaded từ "..SAVE_FILE)
+    addLog("🔗 URL: "..CONFIG.WEBHOOK_URL:sub(1,40).."...")
+    if statusLabel then
+        statusLabel.Text = "📂 Config loaded — ready!"
+        statusLabel.TextColor3 = Color3.fromRGB(63,185,80)
+    end
+else
+    addLog("🆕 Không có save file — nhập config và bấm SAVE")
+end
+
+addLog("🚀 SailorHook v8 started — "..LP.Name)
 startDetection()
 hookStats()
 
