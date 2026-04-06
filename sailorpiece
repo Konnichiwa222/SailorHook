@@ -1,0 +1,269 @@
+-- ══════════════════════════════════════════════════════
+--  ZyxCore  ·  Monochrome Hub V3 (Patch: Execution & State Machine)
+--  Fix: Double Compilation Loss & Garbage Collection Override
+-- ══════════════════════════════════════════════════════
+
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Debris           = game:GetService("Debris")
+local LocalPlayer      = Players.LocalPlayer
+
+-- ┌─────────────────────────────────────────┐
+--   PALETTE
+-- └─────────────────────────────────────────┘
+local C = {
+    bg       = Color3.fromRGB(12, 12, 12),
+    panel    = Color3.fromRGB(22, 22, 22),
+    border   = Color3.fromRGB(45, 45, 45),
+    borderH  = Color3.fromRGB(150, 150, 150),
+    text     = Color3.fromRGB(240, 240, 240),
+    textDim  = Color3.fromRGB(130, 130, 130),
+    white    = Color3.fromRGB(255, 255, 255),
+}
+
+local function Corner(p, px)
+    local c = Instance.new("UICorner") ; c.CornerRadius = UDim.new(0, px or 4) ; c.Parent = p ; return c
+end
+local function Stroke(p, col, th)
+    local s = Instance.new("UIStroke") ; s.Color = col or C.border ; s.Thickness = th or 1 ; s.Parent = p ; return s
+end
+local function Tw(obj, t, props, sty, dir)
+    return TweenService:Create(obj, TweenInfo.new(t, sty or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), props)
+end
+
+local function Ripple(btn, x, y)
+    local r = Instance.new("Frame")
+    r.BackgroundColor3 = C.white ; r.BackgroundTransparency = 0.8 ; r.BorderSizePixel = 0
+    r.ZIndex = 20 ; r.AnchorPoint = Vector2.new(0.5,0.5) ; r.Size = UDim2.new(0,0,0,0)
+    r.Position = UDim2.new((x - btn.AbsolutePosition.X)/btn.AbsoluteSize.X, 0, (y - btn.AbsolutePosition.Y)/btn.AbsoluteSize.Y, 0)
+    r.Parent = btn ; Corner(r, 999)
+    Tw(r, 0.4, {Size=UDim2.new(2.8,0,2.8,0), BackgroundTransparency=1}):Play()
+    Debris:AddItem(r, 0.42)
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name           = "ZyxCore_Monochrome"
+ScreenGui.ResetOnSpawn   = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent         = LocalPlayer:WaitForChild("PlayerGui")
+
+local function Toast(msg)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(0, 240, 0, 36) ; f.Position = UDim2.new(0.5,-120, 1, 12)
+    f.BackgroundColor3 = C.panel ; f.BorderSizePixel = 0 ; f.ZIndex = 50 ; f.Parent = ScreenGui
+    Corner(f, 4) ; Stroke(f, C.white, 1)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1,-12,1,0) ; lbl.Position = UDim2.new(0,6,0,0)
+    lbl.BackgroundTransparency = 1 ; lbl.Font = Enum.Font.Code ; lbl.TextSize = 12
+    lbl.TextColor3 = C.text ; lbl.Text = msg ; lbl.TextXAlignment = Enum.TextXAlignment.Center
+    lbl.ZIndex = 51 ; lbl.Parent = f
+
+    Tw(f, 0.25, {Position=UDim2.new(0.5,-120,1,-46)}, Enum.EasingStyle.Back):Play()
+    task.delay(2.2, function()
+        Tw(f, 0.2, {Position=UDim2.new(0.5,-120,1,12), BackgroundTransparency=1}):Play()
+        Tw(lbl, 0.2, {TextTransparency=1}):Play()
+        Debris:AddItem(f, 0.25)
+    end)
+end
+
+-- ┌─────────────────────────────────────────┐
+--   MAIN WINDOW
+-- └─────────────────────────────────────────┘
+local WIN_W, WIN_H = 420, 300
+
+local Win = Instance.new("Frame")
+Win.Size = UDim2.new(0, WIN_W, 0, WIN_H) ; Win.Position = UDim2.new(0.5, -WIN_W/2, 0.5, -WIN_H/2)
+Win.BackgroundColor3 = C.bg ; Win.BorderSizePixel = 0 ; Win.ClipsDescendants = true
+Win.ZIndex = 10 ; Win.Parent = ScreenGui
+Corner(Win, 4) ; Stroke(Win, C.border, 1)
+
+local TBar = Instance.new("Frame")
+TBar.Size = UDim2.new(1,0,0,32) ; TBar.BackgroundColor3 = C.panel ; TBar.BorderSizePixel = 0
+TBar.ZIndex = 11 ; TBar.Parent = Win
+local TDiv = Instance.new("Frame")
+TDiv.Size = UDim2.new(1,0,0,1) ; TDiv.Position = UDim2.new(0,0,1,0)
+TDiv.BackgroundColor3 = C.border ; TDiv.BorderSizePixel = 0 ; TDiv.ZIndex = 12 ; TDiv.Parent = TBar
+
+local Logo = Instance.new("TextLabel")
+Logo.Text = "[ ZYXCORE ]" ; Logo.Size = UDim2.new(0,100,1,0) ; Logo.Position = UDim2.new(0,12,0,0)
+Logo.BackgroundTransparency = 1 ; Logo.Font = Enum.Font.GothamBold ; Logo.TextSize = 12
+Logo.TextColor3 = C.text ; Logo.TextXAlignment = Enum.TextXAlignment.Left ; Logo.ZIndex = 12 ; Logo.Parent = TBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0,32,1,0) ; CloseBtn.Position = UDim2.new(1,-32,0,0)
+CloseBtn.BackgroundTransparency = 1 ; CloseBtn.Text = "✕" ; CloseBtn.Font = Enum.Font.Gotham
+CloseBtn.TextSize = 12 ; CloseBtn.TextColor3 = C.textDim ; CloseBtn.ZIndex = 13 ; CloseBtn.Parent = TBar
+CloseBtn.MouseEnter:Connect(function() Tw(CloseBtn, 0.1, {TextColor3=C.white}):Play() end)
+CloseBtn.MouseLeave:Connect(function() Tw(CloseBtn, 0.1, {TextColor3=C.textDim}):Play() end)
+
+-- ┌─────────────────────────────────────────┐
+--   PAGES
+-- └─────────────────────────────────────────┘
+local Pages = Instance.new("Frame")
+Pages.Size = UDim2.new(2,0,1,-32) ; Pages.Position = UDim2.new(0,0,0,32)
+Pages.BackgroundTransparency = 1 ; Pages.ZIndex = 10 ; Pages.Parent = Win
+
+local P0 = Instance.new("Frame")
+P0.Size = UDim2.new(0.5,0,1,0) ; P0.Position = UDim2.new(0,0,0,0)
+P0.BackgroundTransparency = 1 ; P0.Parent = Pages
+
+local BootLog = Instance.new("ScrollingFrame")
+BootLog.Size = UDim2.new(1,-24,1,-40) ; BootLog.Position = UDim2.new(0,12,0,8)
+BootLog.BackgroundTransparency = 1 ; BootLog.BorderSizePixel = 0 ; BootLog.ScrollBarThickness = 0 ; BootLog.ZIndex = 11 ; BootLog.Parent = P0
+local LogLayout = Instance.new("UIListLayout")
+LogLayout.SortOrder = Enum.SortOrder.LayoutOrder ; LogLayout.Padding = UDim.new(0,2) ; LogLayout.Parent = BootLog
+
+local lineCount = 0
+local function AddLine(text, highlight)
+    lineCount += 1
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1,0,0,14) ; lbl.BackgroundTransparency = 1 ; lbl.Font = Enum.Font.Code ; lbl.TextSize = 11
+    lbl.TextColor3 = highlight and C.text or C.textDim ; lbl.Text = text ; lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.LayoutOrder = lineCount ; lbl.Parent = BootLog
+    BootLog.CanvasSize = UDim2.new(0,0,0, lineCount*16)
+    BootLog.CanvasPosition = Vector2.new(0, math.max(0, lineCount*16 - BootLog.AbsoluteSize.Y))
+end
+
+local P1 = Instance.new("Frame")
+P1.Size = UDim2.new(0.5,0,1,0) ; P1.Position = UDim2.new(0.5,0,0,0)
+P1.BackgroundTransparency = 1 ; P1.Parent = Pages
+
+local Profile = Instance.new("Frame")
+Profile.Size = UDim2.new(1,-24,0,42) ; Profile.Position = UDim2.new(0,12,0,12)
+Profile.BackgroundColor3 = C.panel ; Profile.BorderSizePixel = 0 ; Profile.Parent = P1
+Corner(Profile, 4) ; Stroke(Profile, C.border, 1)
+
+local AvatarMask = Instance.new("Frame")
+AvatarMask.Size = UDim2.new(0,30,0,30) ; AvatarMask.Position = UDim2.new(0,6,0.5,-15)
+AvatarMask.BackgroundColor3 = C.bg ; AvatarMask.Parent = Profile ; Corner(AvatarMask, 4)
+local Avatar = Instance.new("ImageLabel")
+Avatar.Size = UDim2.new(1,0,1,0) ; Avatar.BackgroundTransparency = 1 ; Avatar.Parent = AvatarMask ; Corner(Avatar, 4)
+
+task.spawn(function()
+    local thumb, ready = Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+    if ready then Avatar.Image = thumb end
+end)
+
+local DisplayName = Instance.new("TextLabel")
+DisplayName.Size = UDim2.new(1,-50,0,16) ; DisplayName.Position = UDim2.new(0,44,0,5)
+DisplayName.BackgroundTransparency = 1 ; DisplayName.Font = Enum.Font.GothamBold ; DisplayName.TextSize = 13 ; DisplayName.TextColor3 = C.text
+DisplayName.Text = LocalPlayer.DisplayName ; DisplayName.TextXAlignment = Enum.TextXAlignment.Left ; DisplayName.Parent = Profile
+
+local Username = Instance.new("TextLabel")
+Username.Size = UDim2.new(1,-50,0,12) ; Username.Position = UDim2.new(0,44,0,23)
+Username.BackgroundTransparency = 1 ; Username.Font = Enum.Font.Gotham ; Username.TextSize = 11 ; Username.TextColor3 = C.textDim
+Username.Text = "@" .. LocalPlayer.Name ; Username.TextXAlignment = Enum.TextXAlignment.Left ; Username.Parent = Profile
+
+local ScriptList = Instance.new("ScrollingFrame")
+ScriptList.Size = UDim2.new(1,-24,1,-70) ; ScriptList.Position = UDim2.new(0,12,0,62)
+ScriptList.BackgroundTransparency = 1 ; ScriptList.BorderSizePixel = 0
+ScriptList.ScrollBarThickness = 2 ; ScriptList.ScrollBarImageColor3 = C.borderH ; ScriptList.Parent = P1
+local ListLayout = Instance.new("UIListLayout")
+ListLayout.SortOrder = Enum.SortOrder.LayoutOrder ; ListLayout.Padding = UDim.new(0,8) ; ListLayout.Parent = ScriptList
+
+-- ┌─────────────────────────────────────────┐
+--   EXECUTION LOGIC
+-- └─────────────────────────────────────────┘
+local function CreateScriptBtn(title, desc, url, order)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1,-6,0,50) ; btn.BackgroundColor3 = C.panel ; btn.Text = "" ; btn.AutoButtonColor = false
+    btn.LayoutOrder = order ; btn.Parent = ScriptList
+    Corner(btn, 4) ; local btnStroke = Stroke(btn, C.border, 1)
+
+    local lblTitle = Instance.new("TextLabel")
+    lblTitle.Text = title ; lblTitle.Size = UDim2.new(1,-12,0,20) ; lblTitle.Position = UDim2.new(0,12,0,8)
+    lblTitle.BackgroundTransparency = 1 ; lblTitle.Font = Enum.Font.GothamBold ; lblTitle.TextSize = 13 ; lblTitle.TextColor3 = C.white ; lblTitle.TextXAlignment = Enum.TextXAlignment.Left ; lblTitle.Parent = btn
+
+    local lblDesc = Instance.new("TextLabel")
+    lblDesc.Text = desc ; lblDesc.Size = UDim2.new(1,-12,0,15) ; lblDesc.Position = UDim2.new(0,12,0,26)
+    lblDesc.BackgroundTransparency = 1 ; lblDesc.Font = Enum.Font.Gotham ; lblDesc.TextSize = 11 ; lblDesc.TextColor3 = C.textDim ; lblDesc.TextXAlignment = Enum.TextXAlignment.Left ; lblDesc.Parent = btn
+
+    local playIcon = Instance.new("TextLabel")
+    playIcon.Text = "▶" ; playIcon.Size = UDim2.new(0,20,1,0) ; playIcon.Position = UDim2.new(1,-24,0,0)
+    playIcon.BackgroundTransparency = 1 ; playIcon.Font = Enum.Font.Gotham ; playIcon.TextSize = 14 ; playIcon.TextColor3 = C.textDim ; playIcon.Parent = btn
+
+    btn.MouseEnter:Connect(function() Tw(btnStroke, 0.15, {Color = C.borderH}):Play() ; Tw(playIcon, 0.15, {TextColor3 = C.white}):Play() end)
+    btn.MouseLeave:Connect(function() Tw(btnStroke, 0.15, {Color = C.border}):Play() ; Tw(playIcon, 0.15, {TextColor3 = C.textDim}):Play() end)
+    btn.MouseButton1Down:Connect(function(x,y) Ripple(btn,x,y) end)
+    
+    btn.MouseButton1Click:Connect(function()
+        Toast("Injecting " .. title .. "...")
+        task.spawn(function()
+            local success, err = pcall(function()
+                -- Nạp chuỗi trực tiếp từ URL và thực thi qua VM của Executor
+                loadstring(game:HttpGet(url))()
+            end)
+            if success then Toast("✔ Injected Successfully") else Toast("✕ Error Occurred") warn("[ZyxCore] VM Fault: ", err) end
+        end)
+    end)
+end
+
+CreateScriptBtn("Sailor Piece", "Thực thi kịch bản Sailor Piece tự động.", "https://raw.githubusercontent.com/ZhangJunZ84/twvzyyds/refs/heads/main/sailorpiece.lua", 1)
+CreateScriptBtn("Jujutsu Shenanigans", "Thực thi kịch bản hỗ trợ Jujutsu.", "https://raw.githubusercontent.com/cool5013/TBO/main/TBOscript", 2)
+ScriptList.CanvasSize = UDim2.new(0,0,0, ListLayout.AbsoluteContentSize.Y + 10)
+
+-- ┌─────────────────────────────────────────┐
+--   STATE MACHINE & WINDOW CONTROLS
+-- └─────────────────────────────────────────┘
+local dragging, dStart, dWin
+TBar.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true ; dStart = i.Position ; dWin = Win.Position end end)
+TBar.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging=false end end)
+UserInputService.InputChanged:Connect(function(i) if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then local d = i.Position - dStart ; Win.Position = UDim2.new(dWin.X.Scale, dWin.X.Offset+d.X, dWin.Y.Scale, dWin.Y.Offset+d.Y) end end)
+
+local isVisible = true
+
+local function ToggleGUI()
+    isVisible = not isVisible
+    if isVisible then
+        Win.Visible = true
+        Tw(Win, 0.28, {Size=UDim2.new(0,WIN_W,0,WIN_H), Position=UDim2.new(0.5,-WIN_W/2, 0.5,-WIN_H/2)}, Enum.EasingStyle.Back):Play()
+    else
+        Tw(Win, 0.2, {Size=UDim2.new(0,WIN_W,0,0), Position=UDim2.new(0.5,-WIN_W/2,0.5,0)}, Enum.EasingStyle.Quad, Enum.EasingDirection.In):Play()
+        task.wait(0.2)
+        Win.Visible = false
+    end
+end
+
+CloseBtn.MouseButton1Click:Connect(function()
+    ToggleGUI()
+    Toast("Ẩn GUI thành công. Nhấn [RightControl] để mở lại.")
+end)
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.RightControl then
+        ToggleGUI()
+    end
+end)
+
+-- ┌─────────────────────────────────────────┐
+--   BOOT SEQUENCE
+-- └─────────────────────────────────────────┘
+local BOOT = {
+    { t=0.4, txt="> BIOS v2.4.1 ............... OK",  hl=false },
+    { t=0.5, txt="> loading kernel modules .... OK",  hl=false },
+    { t=0.4, txt="> mounting file system ...... OK",  hl=false },
+    { t=0.4, txt="> fetching user profile ..... OK",  hl=false },
+    { t=0.5, txt="> spawning ui thread ........ OK",  hl=false },
+    { t=0.8, txt="> ZyxCore ready",                 hl=true  },
+}
+
+Win.Size = UDim2.new(0, WIN_W, 0, 0)
+Win.Position = UDim2.new(0.5,-WIN_W/2, 0.5, 0)
+Tw(Win, 0.35, {Size=UDim2.new(0,WIN_W,0,WIN_H), Position=UDim2.new(0.5,-WIN_W/2, 0.5,-WIN_H/2)}, Enum.EasingStyle.Back):Play()
+
+task.spawn(function()
+    task.wait(0.4)
+    AddLine("ZyxCore OS - v3.0 (Monochrome Hub)", true)
+    AddLine("Bypassing security protocols...", false)
+    
+    for _, step in ipairs(BOOT) do
+        task.wait(step.t)
+        AddLine(step.txt, step.hl)
+    end
+
+    task.wait(0.3)
+    Tw(Pages, 0.5, {Position=UDim2.new(-1,0,0,32)}, Enum.EasingStyle.Quint):Play()
+end)
